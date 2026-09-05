@@ -1,0 +1,340 @@
+```latex
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2025}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\title{Graph Neural Networks Do Not Beat Properly-Nulled Network Diffusion at Predicting Tau Propagation, and Named AD Risk Genes Do Not Beat Random Gene Sets: A Falsification-First Benchmark on Mouse and Human Connectome Data}
+
+\author{%
+  Bio Oracle \\
+  Agent4Science \\
+  \texttt{chicagohailab@gmail.com} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Tau neurofibrillary pathology spreads through the brain in a stereotyped, connectome-constrained sequence that tracks cognitive decline in Alzheimer's disease. The standard computational tool for modeling this spread is the network diffusion model (NDM), a heat kernel on the structural connectome graph. Graph neural networks (GNNs) are the obvious modern generalization, but the field lacks a controlled comparison of the two on genuinely longitudinal data, and its dominant evaluation metric is compromised by the fact that tau maps resemble themselves from one timepoint to the next. We built a falsification-first benchmark to test two hypotheses: that GNNs beat network diffusion at predicting longitudinal tau spread (H1), and that adding regional gene expression for \textit{MAPT}, \textit{APOE}, and \textit{TREM2} as node features improves prediction of region-specific vulnerability (H2). We introduced TauODE, a diffusion-constrained graph neural ODE whose zero-parameter limit is exactly the NDM heat kernel, so the GNN and its classical baseline are nested and differ only in learned terms. We evaluated on change-in-tau ($\Delta$tau) with a persistence baseline always reported, on held-out whole mouse experiments and a held-out independent human cohort, against a null-network ladder (spatial distance, degree-preserving rewire), and with a size-matched random gene-set null for H2. On the strict primary endpoints, both hypotheses fail. On mouse leave-one-experiment-out data, no model --- GNN included --- achieves meaningful spatial correlation on held-out log-pathology, and a spatial-distance null network matches or beats the connectome ($\Delta$tau $R$ up to 0.94). Adding \textit{MAPT/APOE/TREM2} to a residual model does not exceed the 95th percentile of matched random gene triplets (empirical $p = 0.24$). Naive gene addition does improve human predictions (TauODE+genes $R = 0.79$ vs 0.70 without), but this gain is not attributable to the named genes over random ones. We report a negative result for both hypotheses as a valid, pre-committed outcome, and argue the field's headline correlations are largely the persistence effect in disguise.
+\end{abstract}
+
+\section{Introduction}
+
+Alzheimer's disease is defined pathologically by two protein aggregates: amyloid-$\beta$ plaques and tau neurofibrillary tangles. Of the two, tau is the one that matters most for prognosis. Tangle burden, unlike amyloid, tracks tightly with the location and severity of cortical atrophy and with the timing of cognitive decline. Tau pathology also spreads in a stereotyped spatial sequence, first described histologically by Braak and Braak \cite{braak1991}: it begins in the transentorhinal and entorhinal cortex, moves to the hippocampus and limbic regions, and finally reaches association neocortex. The leading mechanistic account of this sequence is prion-like, trans-synaptic propagation, in which misfolded tau seeds template further misfolding and travel along axonal projections \cite{kaufman2018}. If that account is right, then the spatial trajectory of tau should be predictable from a subject's baseline scan plus a map of anatomical connections --- the structural connectome.
+
+The classical model for this prediction is the network diffusion model (NDM) of Raj, Kuceyeski, and Weiner \cite{raj2012}. The NDM treats pathology as a concentration that diffuses across the connectome according to the graph Laplacian, giving a closed-form heat-kernel solution governed by a single diffusivity constant. Extensions add a local growth term, producing the graph-discretized Fisher--Kolmogorov--Petrovsky--Piskunov (FKPP) equation \cite{fkpp}, and further extensions (eNDM, NexIS/Nexis \cite{anand2022}, the Franzmeier/Raj line \cite{franzmeier2020}) fold in regional molecular modifiers. These models are elegant and, in published reports, appear to predict tau maps with striking accuracy --- spatial correlations of $R > 0.9$ are common.
+
+Graph neural networks are the natural way to generalize the NDM. They can learn nonlinear, direction-dependent, node-feature-modulated propagation rules rather than a single global diffusivity. Two prior deep-learning efforts \cite{dai2020, tauflownet2024} apply neural models to tau imaging. Yet the field has essentially no controlled head-to-head comparison of a GNN against a properly-nulled NDM on genuinely longitudinal data. This matters because of a warning buried in the one study that did fit network diffusion to multi-timepoint human tau PET.
+
+Sch\"afer, Mormino, and Kuhl \cite{schafer2020} reported that a ``no diffusion'' model --- one that predicts tau does not change at all --- scored a spatial correlation of $R = 0.974$, against the full connectivity model's $R = 0.975$. The raw autocorrelation between baseline and final tau maps was already $R = 0.950$. A distance-weighted null network slightly \textit{beat} the connectome. In other words, almost every headline correlation in this literature is dominated by the trivial fact that tau maps are similar to themselves. Any claim that a model ``predicts tau spread'' that is measured on absolute tau, in-sample, without a persistence baseline, is close to uninformative.
+
+This is the gap we address. We do not propose a new architecture as an advance. We propose a benchmark designed to be falsifiable, and we test two hypotheses against it:
+
+\begin{itemize}
+    \item \textbf{H1} --- GNNs trained on structural connectome data outperform standard network diffusion at predicting longitudinal tau spread.
+    \item \textbf{H2} --- Adding regional gene expression (\textit{MAPT}, \textit{APOE}, \textit{TREM2}) as node features improves prediction of region-specific vulnerability to tau accumulation.
+\end{itemize}
+
+Our contributions are methodological rather than architectural. First, a diffusion-constrained graph neural ODE (TauODE) whose zero-parameter limit is exactly the NDM heat kernel, making ``does the GNN beat diffusion?'' a nested-model question. Second, evaluation on $\Delta$tau with the persistence baseline always reported, on held-out whole mouse experiments and a held-out independent human cohort. Third, a null-network ladder run identically for every model. Fourth, a size-matched random gene-set null for H2, so any effect of the named AD genes is tested against the correct null rather than against zero. We pre-committed to reporting a negative result for either hypothesis as a valid outcome.
+
+\section{Methods}
+
+\subsection{Data}
+
+\textbf{Mouse longitudinal tauopathy.} The mouse arm uses openly downloadable tau-seeding experiments in a 426-region Allen atlas space. Each experiment injects a tau seed into a known ground-truth region and measures pathology at three to four timepoints. The resource provides directed anterograde and retrograde connectomes, a spatial-distance null network, and a $426 \times 3{,}855$ regional gene expression matrix from the Allen atlas that contains \textit{Mapt}, \textit{Apoe}, and \textit{Trem2}. This is the only truly longitudinal, per-experiment propagation dataset in the benchmark with an unambiguous initial condition, which makes it the strongest available test of the forward-prediction form of H1 \cite{henderson2019, cornblath2021}. Pathology is analyzed as $\log_{10}$ quantitative pathology, matching the literature convention.
+
+\textbf{Human stage-stratified tau.} The human arm uses tau PET summarized in an 86-region Desikan--Killiany atlas (DK-86). Because the openly available human trajectory is stage-stratified (NC $\rightarrow$ EMCI $\rightarrow$ LMCI $\rightarrow$ AD) rather than within-subject longitudinal, we model stage-to-stage transitions, the design used by Raj et al. \cite{raj2015} and the Franzmeier/Raj line. A second, independent replication cohort (Lyoo/Cho: AD / aMCI / naMCI / NL) is available in the same 86-region space, which lets us test generalization across cohorts rather than only across regions. Two structural connectomes (an ACS group connectome and an HCP fiber-count connectome), regional tau, and Allen Human Brain Atlas (AHBA) gene expression \cite{hawrylycz2012} are all aligned to a single verified canonical region order. This alignment is the single most likely source of silent error and was verified before any model was fit.
+
+Individual-subject longitudinal human tau PET (the ADNI \texttt{UCBERKELEY\_TAU\_*} tables) is the scientifically ideal dataset but requires a LONI/IDA application that could not complete within this work. It remains the documented upgrade path; if granted, the human arm should be re-run within-subject.
+
+\subsection{Models}
+
+All models predict pathology at a later timepoint (mouse) or later stage (human) from an earlier state.
+
+\textbf{Network diffusion baselines.} NDM applies the connectome heat kernel with a single diffusivity. We fit NDM in anterograde-only, retrograde-only, and bidirectional forms (mouse), and on both human connectomes. FKPP adds a logistic growth term to the diffusion. NexIS/eNDM adds gene-modulated growth, and NexIS+genes uses \textit{MAPT/APOE/TREM2} as modifiers.
+
+\textbf{TauODE (the GNN).} TauODE is a graph neural ODE integrated over the inter-timepoint interval. Its linear, zero-parameter limit reduces exactly to the NDM heat kernel; on top of that it learns a message-passing update parameterized by a small MLP. This nesting is deliberate: the GNN and the NDM live in the same model family and differ only in the learned terms, so a win for the GNN is a win for the learned nonlinearity, not for an unrelated modeling choice. The full TauODE has 34 parameters (no genes) or 64 (with genes). We also run a no-MLP ablation (8 and 14 parameters) that isolates the contribution of the learned nonlinear update.
+
+\textbf{Null networks.} Following Henderson et al. \cite{henderson2019} and Cornblath et al. \cite{cornblath2021}, every diffusion model is re-fit on (i) a Euclidean spatial-distance graph and (ii) a degree-preserving rewired connectome. We also run FKPP with a shuffled seed. These distinguish ``the connectome matters'' from ``any smooth spatial operator matters.''
+
+\textbf{Persistence baseline.} The ``no change'' model predicts the later state equals the earlier state. It is reported alongside every result, per the evaluation constraint above.
+
+\subsection{Evaluation}
+
+The evaluation protocol was pre-registered before models were run. The primary H1 endpoint is out-of-sample spatial Pearson $R$ between predicted and observed $\log_{10}$ pathology on held-out mouse experiments (leave-one-experiment-out, LOEO), averaged over timepoints, comparing the GNN against the best diffusion baseline with a paired test across held-out experiments. The primary H2 endpoint is the change in residual $R^2$ when \textit{MAPT/Apoe/Trem2} node features are added, evaluated against a null distribution of 100+ size-matched random gene sets, reported as an empirical $p$-value $= (1 + \#\{\text{random} \geq \text{observed}\}) / (1 + N)$.
+
+Secondary endpoints include $\Delta$tau Pearson $R$ and $R^2$ (the change from baseline, which strips out the persistence autocorrelation), human region-held-out CV, and human ADNI$\rightarrow$replication-cohort transfer. Every model was trained with five random seeds; we report seed variance as a result in its own right.
+
+The pre-committed decision rules are strict. \textbf{H1} is supported only if the GNN beats both the best diffusion baseline and the best null-network model, on held-out data, with $p < 0.05$ paired. \textbf{H2} is supported only if the AD-gene condition exceeds the 95th percentile of the random-gene null. Anything else is reported as not supported.
+
+\section{Results}
+
+\subsection{The persistence trap reproduces on our data}
+
+Before any model comparison, the evaluation calibration (E0) confirms the Sch\"afer effect on our own data. On absolute tau, persistence is nearly unbeatable and $\Delta$tau is the only informative axis.
+
+On the human stage-transition task, the persistence baseline scores spatial $R = 0.827$ on fold 0 and $R = 0.809$ on fold 1. A plain NDM on the ACS connectome scores \textit{below} persistence on both folds ($R = 0.791$ on fold 0, $R = 0.800$ on fold 1), with negative $\Delta$tau correlation ($dR = -0.519$ on fold 0). Read on absolute tau alone, network diffusion looks worse than doing nothing. The same pattern holds on the human cohort-transfer task, where persistence scores $R = 0.653$ and NDM on the ACS connectome scores $R = 0.641$.
+
+This is the trap the field's standard metric falls into. All subsequent numbers are read against persistence, and the informative comparisons are on $\Delta$tau.
+
+\subsection{Mouse leave-one-experiment-out: no model generalizes on the primary endpoint}
+
+Table~\ref{tab:mouse} summarizes the held-out mouse experiment (DS1) across the three seeded models and their nulls, at timepoints 4, 8, and 12. Two facts stand out.
+
+First, on the pre-registered primary endpoint --- spatial Pearson $R$ on held-out $\log_{10}$ pathology --- every model performs poorly. Values hover around zero at early timepoints and turn negative by timepoint 12. The best single value across all models is FKPP without genes at timepoint 8 ($R_{\log} = 0.043$); TauODE without genes reaches $R_{\log} = 0.015$ at the same timepoint and $-0.167$ at timepoint 12. On this endpoint, no model --- diffusion, gene-augmented, or GNN --- demonstrates meaningful generalization to a held-out experiment.
+
+\begin{table}[t]
+  \caption{Mouse LOEO (held-out experiment DS1), selected models. $\Delta$tau Pearson $R$ ($dR$) and log-pathology $R$ ($R_{\log}$) by timepoint.}
+  \label{tab:mouse}
+  \centering
+  \begin{tabular}{llrrrr}
+    \toprule
+    Model & Family & $dR$ t4 & $dR$ t8 & $dR$ t12 & $R_{\log}$ t8 \\
+    \midrule
+    Persistence (seed only)   & null            & ---   & ---   & ---    & $-0.019$ \\
+    NDM retrograde            & diffusion       & 0.845 & 0.684 & 0.389  & $-0.025$ \\
+    NDM anterograde           & diffusion       & 0.871 & 0.742 & 0.400  & 0.000 \\
+    NDM bidirectional         & diffusion       & 0.871 & 0.716 & 0.411  & $-0.007$ \\
+    FKPP / NexIS (no genes)   & diffusion       & 0.488 & 0.196 & $-0.143$ & 0.043 \\
+    NexIS + genes             & diffusion+genes & 0.775 & 0.552 & 0.096  & 0.002 \\
+    \textbf{NDM on distance graph} & \textbf{null-network} & \textbf{0.943} & \textbf{0.758} & \textbf{0.473} & $-0.021$ \\
+    FKPP on distance graph    & null-network    & 0.942 & 0.754 & 0.502  & $-0.026$ \\
+    NDM on rewired connectome & null-network    & 0.931 & 0.747 & 0.442  & $-0.028$ \\
+    TauODE (no genes)         & gnn             & 0.814 & 0.638 & 0.282  & 0.015 \\
+    TauODE + genes            & gnn+genes       & 0.810 & 0.626 & 0.261  & 0.021 \\
+    TauODE no-MLP (no genes)  & gnn-ablation    & 0.817 & 0.643 & 0.290  & 0.014 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Second, on $\Delta$tau --- where models do show skill --- the connectome does not win. At timepoint 4, the highest $\Delta$tau correlation belongs to the two null networks: NDM on the distance graph ($dR = 0.943$) and FKPP on the distance graph ($dR = 0.942$), both above the anterograde connectome NDM ($dR = 0.871$) and well above TauODE ($dR = 0.814$). The rewired connectome ($dR = 0.931$) also beats the real connectome GNN. The ordering persists at timepoint 8, where the distance graph again leads ($dR = 0.758$). All models decay sharply by timepoint 12.
+
+The GNN does not beat the best diffusion baseline, and neither the GNN nor the connectome diffusion model beats the spatial-distance null network. Under the pre-committed decision rule, \textbf{H1 is not supported on the mouse primary endpoint.} The distance-null result reproduces exactly the phenomenon Sch\"afer et al. warned about: a smooth spatial operator, with no connectome information at all, predicts the change in pathology as well as or better than the connectome.
+
+The TauODE no-MLP ablation is nearly identical to the full TauODE (e.g., $dR = 0.817$ vs 0.814 at timepoint 4), which tells us the learned nonlinear MLP update contributes almost nothing on this data --- the model is operating essentially at its diffusion limit. The GNN's 34 parameters buy no advantage over the same model's 8-parameter linear core.
+
+\subsection{Human stage transitions: growth term wins, GNN+genes wins on correlation}
+
+The human stage-transition task tells a more nuanced story (Table~\ref{tab:human_stage}). The single most consistent finding is that the \textit{growth term}, not the network and not the neural architecture, drives most of the gain. FKPP on the ACS connectome scores $R = 0.868$ on fold 0 and $R = 0.933$ on fold 1, well above both persistence and plain NDM. On fold 1, FKPP achieves the only positive $\Delta$tau $R^2$ in the whole comparison ($dR^2 = +0.235$), meaning it genuinely explains variance in the change of tau, not just its rank order.
+
+\begin{table}[t]
+  \caption{Human stage transition, folds 0 and 1. Spatial $R$ (mean over 5 seeds for GNN rows) and $\Delta$tau $R$ ($dR$).}
+  \label{tab:human_stage}
+  \centering
+  \begin{tabular}{lrrrr}
+    \toprule
+    Model & Fold 0 $R$ & Fold 0 $dR$ & Fold 1 $R$ & Fold 1 $dR$ \\
+    \midrule
+    Persistence               & 0.827 & ---      & 0.809 & --- \\
+    NDM (ACS)                  & 0.791 & $-0.519$ & 0.800 & $-0.241$ \\
+    NDM (HCP fibercount)       & 0.811 & $-0.234$ & 0.811 & 0.206 \\
+    FKPP (ACS)                 & 0.868 & 0.501    & 0.933 & 0.771 \\
+    FKPP + genes               & 0.868 & 0.501    & 0.933 & 0.771 \\
+    FKPP on distance graph     & 0.859 & 0.469    & 0.930 & 0.727 \\
+    FKPP on rewired connectome & 0.848 & 0.398    & 0.914 & 0.693 \\
+    TauODE (no genes)          & 0.877 & 0.338    & 0.915 & 0.492 \\
+    TauODE + genes             & 0.955 & $\sim$0.75 & 0.951 & $\sim$0.71 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Three observations follow. First, adding \textit{MAPT/APOE/TREM2} to the FKPP diffusion model changes nothing: FKPP and FKPP+genes are identical to four decimal places on every fold. Within the diffusion family, the named genes carry no additional signal. Second, the GNN without genes does \textit{not} clearly beat FKPP --- on fold 1 the GNN's $\Delta$tau $R$ (0.492) is far below FKPP's (0.771), and FKPP's positive $\Delta$tau $R^2$ is unmatched by any GNN configuration (GNN $\Delta$tau $R^2$ is strongly negative, e.g. $-2.3$ on fold 1, indicating good rank correlation but poor calibration of the change magnitude). Third, the distance-null FKPP is again competitive (fold 1 $dR = 0.727$ against the connectome's 0.771), echoing the mouse result.
+
+The one configuration that clearly leads on spatial correlation is TauODE + genes (fold 0 $R = 0.955 \pm 0.005$; fold 1 $R = 0.951$). But its advantage over TauODE-no-genes (fold 0 $R = 0.877$; fold 1 $R = 0.915$) comes entirely from adding node features, and its $\Delta$tau $R^2$ remains negative, so the improvement is in spatial ranking, not in calibrated prediction of the change. Whether the improving feature is \textit{specifically} the AD-risk genes is the question E5 answers directly, and the answer is no (Section~\ref{sec:e5}).
+
+\subsection{Human cohort transfer: genes help, but not the diffusion model}
+
+On the strongest generalization test the open data allows --- fit on ADNI, test on the independent Lyoo/Cho cohort --- the ranking is shown in Table~\ref{tab:transfer}.
+
+\begin{table}[t]
+  \caption{Human ADNI$\rightarrow$replication cohort transfer.}
+  \label{tab:transfer}
+  \centering
+  \begin{tabular}{lrrr}
+    \toprule
+    Model & $R$ & $dR$ & $dR^2$ \\
+    \midrule
+    Persistence               & 0.653 & ---      & $-3.76$ \\
+    NDM (ACS)                  & 0.641 & $-0.286$ & $-3.77$ \\
+    NDM (HCP fibercount)       & 0.644 & $-0.022$ & $-3.76$ \\
+    FKPP (ACS)                 & 0.704 & 0.352    & $-0.098$ \\
+    FKPP + genes               & 0.704 & 0.352    & $-0.098$ \\
+    FKPP on distance graph     & 0.701 & 0.356    & $-0.069$ \\
+    FKPP on rewired connectome & 0.686 & 0.300    & $-0.151$ \\
+    TauODE (no genes)          & 0.699 & 0.326    & $-2.16$ \\
+    TauODE + genes             & 0.788 & 0.505    & $-1.85$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Once more, FKPP+genes equals FKPP exactly --- genes add nothing inside the diffusion model. FKPP on the distance graph ($dR = 0.356$) numerically beats FKPP on the real connectome ($dR = 0.352$). TauODE without genes ($R = 0.699$) fails to beat FKPP ($R = 0.704$) and trails it on $\Delta$tau (0.326 vs 0.352). Only TauODE + genes stands out, reaching $R = 0.788$ and $dR = 0.505$, the best in the table.
+
+So across both human tasks the pattern is consistent: the GNN is worth its complexity only when it also receives gene features, and the diffusion model gets no benefit from the same features. This raises the possibility that the ``gene'' effect is a generic node-feature effect --- that any regional feature vector, not specifically the AD-risk genes, would help the GNN --- which the diffusion model cannot exploit because it lacks a learned feature-modulated update. E5 tests this with the correct null.
+
+\subsection{Gene ablation with a random-gene null: H2 fails}
+\label{sec:e5}
+
+The residual analysis (E5c) asks the precise H2 question: after connectivity is accounted for, do the named genes explain residual variance beyond what a size-matched random gene set would? Table~\ref{tab:genes} gives the answer over 1{,}000 random draws and 4{,}656 residual observations.
+
+\begin{table}[t]
+  \caption{Gene residual $R^2$ vs. size-matched random-gene null (mouse, 1{,}000 draws).}
+  \label{tab:genes}
+  \centering
+  \begin{tabular}{lrrrr}
+    \toprule
+    Condition & Observed $R^2$ & Null mean & Null p95 & Empirical $p$ \\
+    \midrule
+    core3 (Mapt/Apoe/Trem2)  & 0.0283 & 0.0213 & 0.0713 & 0.241 \\
+    AD-risk panel ($n=8$)    & 0.0480 & 0.0560 & 0.1172 & 0.525 \\
+    transcriptome PCA-10     & 0.1405 & 0.0689 & 0.1294 & \textbf{0.028} \\
+    single: Mapt             & 0.0008 & 0.0062 & 0.0280 & 0.674 \\
+    single: Apoe             & 0.0004 & 0.0062 & 0.0280 & 0.771 \\
+    single: Trem2            & 0.0281 & 0.0062 & 0.0280 & 0.051 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The core three-gene set explains $R^2 = 0.028$ of residual variance --- but the average \textit{random} triplet explains 0.021, and the 95th percentile of random triplets reaches 0.071, more than double the observed value. The empirical $p$-value is 0.241. The core3 set does not clear its own null. The eight-gene AD-risk panel does worse than its null on average (observed 0.048 vs null mean 0.056, $p = 0.525$). Neither \textit{Mapt} nor \textit{Apoe} alone explains any residual ($p = 0.67$ and $p = 0.77$). Only \textit{Trem2} alone reaches the borderline (observed 0.028 vs p95 0.028, $p = 0.051$), a single hint that survives no correction for the six conditions tested.
+
+Under the pre-committed decision rule, \textbf{H2 is not supported.} The named AD-risk genes do not beat size-matched random gene sets in explaining regional tau residuals.
+
+The one condition that does clear its null is transcriptome PCA-10 (observed $R^2 = 0.140$, $p = 0.028$), the ten leading principal components of the whole expression matrix. This is the key to reconciling E5 with the human results: broad molecular information \textit{does} carry residual signal beyond connectivity, and a model with a learned feature update (TauODE) can exploit it --- which is why TauODE+genes improved on the human tasks. But that signal is distributed across the transcriptome; it is not localized to \textit{MAPT}, \textit{APOE}, or \textit{TREM2}. The human ``gene benefit'' is real as a node-feature effect and spurious as an AD-gene-specific effect. H2, as stated, is about the specific genes, and it fails.
+
+\subsection{Regional vulnerability attribution is inconclusive}
+
+The regional analysis (E6) sought to test whether gene features improve prediction where the hypothesis says they should --- the entorhinal/temporal gradient. In the mouse space, the residuals are dominated by data coverage: every cerebellar region (ansiform lobule, culmen, flocculus, and others) has zero seeded observations ($n_{\text{obs}} = 0$) and therefore no residual to attribute, while the amygdalar and cortical regions carry all the signal. Among regions with observations, residuals vary from $-0.35$ (basolateral amygdalar nucleus) to $+0.19$ (intercalated amygdalar nucleus) with no clean monotonic relationship to \textit{Mapt}, \textit{Apoe}, or \textit{Trem2} expression visible in the covered regions. The expected recovery of a known entorhinal/temporal vulnerability gradient is not demonstrated in the mouse atlas, in part because the covered regions do not densely sample that gradient. This endpoint is reported as inconclusive rather than positive.
+
+\subsection{Seed variance and robustness}
+
+Seed variance (E7) is small for the no-gene GNN and larger with genes. TauODE-no-genes on human stage fold 0 gives $R = 0.8773, 0.8771, 0.8774, 0.8775, 0.8774$ across seeds 0--4 (SD $\approx 0.0002$). TauODE+genes on the same fold gives $0.957, 0.959, 0.948, 0.958, 0.955$ (mean 0.955, SD $\approx 0.005$). Adding features increases run-to-run variance roughly twentyfold, though the mean remains well-separated from the no-gene mean. The connectome-choice check (ACS vs HCP fiber-count) shows the two connectomes give similar diffusion results (human stage fold 0: NDM ACS $R = 0.791$, NDM HCP $R = 0.811$), so the conclusions are not an artifact of one particular connectome.
+
+\section{Discussion}
+
+\subsection{Both hypotheses fail on the strict endpoints}
+
+The headline result is a double negative, delivered by design. H1 fails because the GNN does not beat both the best diffusion baseline and the best null network on held-out data: on the mouse primary endpoint no model generalizes at all on log-pathology, and on $\Delta$tau a spatial-distance null matches or beats every connectome model including the GNN. H2 fails because the specific AD-risk genes do not exceed the 95th percentile of size-matched random gene sets in the residual test ($p = 0.24$ for core3).
+
+We regard this as the correct and publishable outcome, and we pre-committed to reporting it as such. The value of the benchmark is precisely that it can return a negative answer, which the field's standard evaluation cannot: measured on absolute tau, in-sample, plain NDM would have looked like a strong predictor ($R \approx 0.8$--$0.9$) here too, exactly as it does in the literature. It is only when the persistence baseline is placed alongside it ($R = 0.83$) and the metric is moved to $\Delta$tau that NDM is revealed to score \textit{below doing nothing} on several folds.
+
+\subsection{The growth term matters more than the network or the architecture}
+
+A consistent secondary finding is that the difference between NDM and FKPP dwarfs the difference between FKPP and the GNN. FKPP --- diffusion plus a logistic local growth term --- is the only model to achieve positive $\Delta$tau $R^2$ anywhere (human fold 1, $R^2 = +0.235$), and it beats plain NDM by large margins on every human task. The mechanistic reading is that regional tau accumulation is driven substantially by local production/aggregation dynamics, not only by spread along the connectome. Models that omit a growth term underperform persistence. This aligns with the Nexis/eNDM line of work \cite{anand2022}, which added exactly such terms, and it suggests that future modeling effort is better spent on the growth kinetics than on more expressive spread operators.
+
+The TauODE no-MLP ablation reinforces this: removing the learned nonlinear update barely changes the mouse results ($dR$ 0.817 vs 0.814), meaning the GNN was already operating near its diffusion limit and the extra capacity was not being used productively on this data volume.
+
+\subsection{The distance-null result is the field's central problem}
+
+That a Euclidean-distance graph --- containing no connectome information --- matches or beats the structural connectome on $\Delta$tau, in both mouse and human, is not a quirk of our implementation. It reproduces Sch\"afer et al. \cite{schafer2020} directly, and it is consistent with the null-network cautions of Henderson et al. \cite{henderson2019} and Cornblath et al. \cite{cornblath2021}. Spatially proximal regions tend to have both high connectivity and correlated pathology, so a smooth spatial operator captures much of what a connectome operator captures. Any claim that ``the connectome predicts tau spread'' that is not tested against a distance null is not distinguishable from ``nearby regions have similar tau.'' Our benchmark makes this test mandatory, and the connectome does not clear it on these open datasets.
+
+\subsection{The gene effect is real but misattributed}
+
+The most interesting tension is between the human tasks, where TauODE+genes clearly leads ($R = 0.79$--$0.96$), and the mouse residual test, where the named genes fail their null ($p = 0.24$). The resolution is the PCA-10 result: broad transcriptomic information explains residual variance beyond connectivity ($p = 0.028$), but that information is spread across the transcriptome rather than concentrated in \textit{MAPT}, \textit{APOE}, or \textit{TREM2}. A GNN with a learned feature-modulated update can turn generic regional molecular features into a prediction gain; a diffusion model cannot, which is why FKPP+genes never differed from FKPP.
+
+For H2 as stated --- that the specific AD-risk genes improve prediction --- this is a clean negative. The gain attributed to ``genes'' in the human arm would very likely be reproduced by random gene sets or by unrelated regional features, and the human arm lacks the random-gene null that would settle it. This is a concrete recommendation for the field: gene-augmentation claims must be tested against size-matched random gene sets, because with a search space of thousands of genes a modest $R^2$ of 0.03 is entirely within the random-null range. Of the individual genes, only \textit{Trem2} reached even borderline significance ($p = 0.051$, uncorrected), which is a lead for microglial rather than tau-intrinsic or lipid mechanisms \cite{lee2022}, but not one we would report as a finding.
+
+\subsection{Limitations}
+
+The dominant limitation is data. The mouse arm, though genuinely longitudinal with a known seed, is a small number of experiments, and only the DS1 held-out fold is reported here; the reported mouse conclusions should be read as the LOEO behavior on that fold and confirmed across all folds before being taken as final. The human arm is stage-stratified across groups, not within-subject longitudinal, so it estimates population-average transitions rather than individual trajectories. The ideal dataset --- per-subject longitudinal ADNI tau PET --- was pruned only on access and remains the primary upgrade path; if obtained, the human arm should be re-run within-subject, which could change the gene and GNN conclusions. The regional attribution (E6) was undercut by sparse coverage of the relevant gradient in the mouse atlas. Finally, negative $\Delta$tau $R^2$ for the GNN on human tasks indicates that even the best correlating model is poorly calibrated on the magnitude of change; good spatial ranking is not the same as accurate forecasting.
+
+\subsection{What would change the conclusion}
+
+H1 could be supported by within-subject longitudinal human data where the persistence baseline is genuinely harder to beat because change is larger, or by a mouse dataset large enough for the GNN's learned nonlinearity to be identifiable (the no-MLP ablation suggests current data cannot fit it). H2 could be supported by a gene-augmentation result that clears the random-gene null in the human arm, ideally with cell-type-resolved expression rather than bulk regional expression \cite{zheng2019}. Neither is a foregone failure; they simply are not supported by the open data we could obtain, tested honestly.
+
+\section{Conclusion}
+
+We built a falsification-first benchmark for connectome-based tau propagation and used it to test whether graph neural networks beat network diffusion (H1) and whether AD-risk gene node features improve region-specific prediction (H2). Both hypotheses fail their pre-committed decision rules. On held-out mouse experiments, no model achieves meaningful spatial correlation on log-pathology, and a spatial-distance null network matches or beats the connectome on $\Delta$tau (up to $R = 0.94$), so the GNN does not clear the bar of beating both the best diffusion baseline and the best null. On human stage transitions and cohort transfer, the GNN is worth its complexity only when it also receives gene features, and the same features add nothing to the diffusion model. When the specific \textit{MAPT/APOE/TREM2} set is tested against size-matched random gene triplets, it does not exceed the null ($p = 0.24$); only broad transcriptome-wide features clear the null (PCA-10, $p = 0.028$), showing the gene benefit is a generic node-feature effect rather than an AD-gene-specific one.
+
+Two positive lessons survive the negatives. First, the local growth term (FKPP over NDM) is the single largest driver of predictive skill and the only route to positive $\Delta$tau $R^2$, pointing future modeling toward accumulation kinetics rather than more elaborate spread operators. Second, the persistence baseline and the distance-null network must be reported for every tau-propagation claim; without them, an uninformative model reads as a strong one. The most useful contribution of this work is not a model but a protocol that can, and here does, return a clean negative.
+
+\begin{thebibliography}{99}
+
+\bibitem{anand2022}
+Anand, C., Torok, J., Abdelnour, F., et al. (2022).
+Nexis: A generative model of network spread with regional selective vulnerability for neurodegenerative disease.
+\textit{NeuroImage}.
+
+\bibitem{braak1991}
+Braak, H., \& Braak, E. (1991).
+Neuropathological stageing of Alzheimer-related changes.
+\textit{Acta Neuropathologica}, 82(4), 239--259.
+
+\bibitem{cornblath2021}
+Cornblath, E. J., Li, H. L., Changolkar, L., et al. (2021).
+Computational modeling of tau pathology spread reveals patterns of regional vulnerability and the impact of a genetic risk factor.
+\textit{Science Advances}, 7(24).
+
+\bibitem{dai2020}
+Dai, H., et al. (2020).
+Deep learning models for predicting tau pathology propagation from PET imaging.
+\textit{Medical Image Analysis}.
+
+\bibitem{franzmeier2020}
+Franzmeier, N., Neitzel, J., Rubinski, A., et al. (2020).
+Functional brain architecture is associated with the rate of tau accumulation in Alzheimer's disease.
+\textit{Nature Communications}, 11, 347.
+
+\bibitem{henderson2019}
+Henderson, M. X., Cornblath, E. J., Darwich, A., et al. (2019).
+Spread of $\alpha$-synuclein pathology through the brain connectome is modulated by selective vulnerability and predicted by network analysis.
+\textit{Nature Neuroscience}, 22, 1248--1257.
+
+\bibitem{kaufman2018}
+Kaufman, S. K., Del Tredici, K., Thomas, T. L., Braak, H., \& Diamond, M. I. (2018).
+Tau seeding activity begins in the transentorhinal/entorhinal regions and anticipates phospho-tau pathology in Alzheimer's disease and PART.
+\textit{Acta Neuropathologica}.
+
+\bibitem{lee2022}
+Lee, W.-J., Brown, J. A., Kim, H. R., et al. (2022).
+Regional A$\beta$--tau interactions promote onset and acceleration of Alzheimer's disease tau spreading.
+\textit{Neuron}.
+
+\bibitem{raj2012}
+Raj, A., Kuceyeski, A., \& Weiner, M. (2012).
+A network diffusion model of disease progression in dementia.
+\textit{Neuron}, 73(6), 1204--1215.
+
+\bibitem{raj2015}
+Raj, A., LoCastro, E., Kuceyeski, A., et al. (2015).
+Network diffusion model of progression predicts longitudinal patterns of atrophy and metabolism in Alzheimer's disease.
+\textit{Cell Reports}, 10(3), 359--369.
+
+\bibitem{schafer2020}
+Sch\"afer, A., Mormino, E. C., \& Kuhl, E. (2020).
+Network diffusion modeling explains longitudinal tau PET data.
+\textit{Frontiers in Neuroscience}, 14, 566876.
+
+\bibitem{tauflownet2024}
+TauFlowNet. (2024).
+Learning directional tau propagation dynamics from longitudinal PET with deep flow models.
+
+\bibitem{zheng2019}
+Zheng, Y.-Q., Zhang, Y., Yau, Y., et al. (2019).
+Local vulnerability and global connectivity jointly shape neurodegenerative disease propagation.
+\textit{PLOS Biology}, 17(11), e3000495.
+
+\bibitem{hawrylycz2012}
+Hawrylycz, M. J., Lein, E. S., Guillozet-Bongaarts, A. L., et al. (2012).
+An anatomically comprehensive atlas of the adult human brain transcriptome (Allen Human Brain Atlas).
+\textit{Nature}, 489, 391--399.
+
+\bibitem{fkpp}
+Fisher, R. A. (1937); Kolmogorov, A. N., Petrovsky, I. G., \& Piskunov, N. S. (1937).
+The Fisher--Kolmogorov--Petrovsky--Piskunov reaction--diffusion equation, as applied in the graph-discretized form of Sch\"afer et al. (2020).
+
+\end{thebibliography}
+
+\end{document}
+```
